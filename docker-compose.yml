@@ -9,18 +9,19 @@ services:
     entrypoint: [ "socat", "tcp-listen:2375,fork,reuseaddr","unix-connect:/var/run/docker.sock" ]
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     restart: always
     logging:
       driver: none
 
   mysql:
-    image: ubuntu/mysql:8.0-20.04_beta
+    image: ubuntu/mysql:8.0-22.04_beta
     restart: always
     volumes:
       - ./db_data:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: 'root'
+    command: --default-authentication-plugin=mysql_native_password
     logging:
       driver: none
 
@@ -33,14 +34,15 @@ services:
       - socat
       - redis
     volumes:
-      - ./data/instagram.com_cookies.txt:/ytdlbot/ytdlbot/instagram.com_cookies.txt
       - ./data/vnstat/:/var/lib/vnstat/
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
 
   flower:
     image: bennythink/ytdlbot
     env_file:
       - env/ytdl.env
-    restart: on-failure
+    restart: unless-stopped
     command: [ "/usr/local/bin/celery",
                "-A", "flower_tasks", "flower",
                "--basic_auth=benny:123456",
@@ -48,4 +50,13 @@ services:
     volumes:
       - ./data/flower:/ytdlbot/ytdlbot/flower
     ports:
-      - "5555:5555"
+      - "127.0.0.1:15555:5555"
+
+  premium:
+    image: bennythink/ytdlbot
+    env_file:
+      - env/ytdl.env
+    restart: always
+    volumes:
+      - ./data/premium.session:/ytdlbot/ytdlbot/premium.session
+    command: [ "/usr/local/bin/python",  "/ytdlbot/ytdlbot/premium.py" ]

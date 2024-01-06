@@ -8,85 +8,76 @@
 __author__ = "Benny <benny.think@gmail.com>"
 
 import os
-import time
 
-from config import (AFD_LINK, COFFEE_LINK, ENABLE_CELERY, ENABLE_VIP, EX,
-                    MULTIPLY, REQUIRED_MEMBERSHIP, USD2CNY)
-from db import InfluxDB
-from downloader import sizeof_fmt
-from limit import QUOTA, VIP
+from config import (
+    AFD_LINK,
+    COFFEE_LINK,
+    ENABLE_CELERY,
+    FREE_DOWNLOAD,
+    REQUIRED_MEMBERSHIP,
+    TOKEN_PRICE,
+)
+from database import InfluxDB
 from utils import get_func_queue
 
 
 class BotText:
-    start = "Welcome to YouTube Download bot. Type /help for more information."
+    start = """
+    Welcome to YouTube Download bot. Type /help for more information. 
+    Backup bot: @benny_2ytdlbot
+    Join https://t.me/+OGRC8tp9-U9mZDZl for updates."""
 
     help = f"""
-1. This bot should works at all times. If it doesn't, try to send the link again or DM @BennyThink
+1. If the bot doesn't work, try again or join https://t.me/+OGRC8tp9-U9mZDZl for updates.
 
-2. At this time of writing, this bot consumes hundreds of GigaBytes of network traffic per day. 
-In order to avoid being abused, 
-every one can use this bot within **{sizeof_fmt(QUOTA)} of quota for every {int(EX / 3600)} hours.**
+2. Source code: https://github.com/tgbot-collection/ytdlbot
+    """
 
-3. Free users can't receive streaming formats of one video whose duration is longer than 300 seconds.
+    about = "YouTube Downloader by @BennyThink.\n\nOpen source on GitHub: https://github.com/tgbot-collection/ytdlbot"
 
-4. You can optionally choose to become 'VIP' user if you need more traffic. Type /vip for more information.
-
-5. Source code for this bot will always stay open, here-> https://github.com/tgbot-collection/ytdlbot
-    """ if ENABLE_VIP else "Help text"
-
-    about = "YouTube-DL by @BennyThink. Open source on GitHub: https://github.com/tgbot-collection/ytdlbot"
-
-    terms = f"""
-1. You can use this service, free of charge, {sizeof_fmt(QUOTA)} per {int(EX / 3600)} hours.
-
-2. The above traffic, is counted for one-way. 
-For example, if you download a video of 1GB, your current quota will be 9GB instead of 8GB.
-
-3. Streaming support is limited due to high costs of conversion.
-
-4. I won't gather any personal information, which means I don't know how many and what videos did you download.
-
-5. Please try not to abuse this service.
-
-6. It's a open source project, you can always deploy your own bot.
-
-7. For VIPs, please refer to /vip command
-    """ if ENABLE_VIP else "Please contact the actual owner of this bot"
-
-    vip = f"""
+    buy = f"""
 **Terms:**
-1. No refund, I'll keep it running as long as I can.
-2. I'll record your unique ID after a successful payment, usually it's payment ID or email address.
-3. VIPs identity won't expire.
+1. You can use this bot to download video for {FREE_DOWNLOAD} times within a 24-hour period.
 
-**Pay Tier:**
-1. Everyone: {sizeof_fmt(QUOTA)} per {int(EX / 3600)} hours
-2. VIP1: ${MULTIPLY} or ¥{MULTIPLY * USD2CNY}, {sizeof_fmt(QUOTA * 5)} per {int(EX / 3600)} hours
-3. VIP2: ${MULTIPLY * 2} or ¥{MULTIPLY * USD2CNY * 2}, {sizeof_fmt(QUOTA * 5 * 2)} per {int(EX / 3600)} hours
-4. VIP4....VIPn.
-5. Unlimited streaming conversion support.
-Note: If you pay $9, you'll become VIP1 instead of VIP2.
+2. You can buy additional download tokens, valid permanently.
 
-**Payment method:**
-1. (afdian) Mainland China: {AFD_LINK}
-2. (buy me a coffee) Other countries or regions: {COFFEE_LINK}
-__I live in a place where I don't have access to Telegram Payments. So...__
+3. Refunds are possible, contact me if you need that @BennyThink
+
+4. Download for paid user will be automatically changed to Local mode to avoid queuing.
+
+5. Paid user can download files larger than 2GB.
+
+**Price:**
+valid permanently
+1. 1 USD == {TOKEN_PRICE} tokens
+2. 7 CNY == {TOKEN_PRICE} tokens
+3. 10 TRX == {TOKEN_PRICE} tokens
+
+**Payment options:**
+Pay any amount you want. For example you can send 20 TRX for {TOKEN_PRICE * 2} tokens.
+1. AFDIAN(AliPay, WeChat Pay and PayPal): {AFD_LINK}
+2. Buy me a coffee: {COFFEE_LINK}
+3. Telegram Bot Payment(Stripe), please click Bot Payment button.
+4. TRON(TRX), please click TRON(TRX) button.
 
 **After payment:**
-1. afdian: with your order number `/vip 123456`
-2. buy me a coffee: with your email `/vip someone@else.com`
-    """ if ENABLE_VIP else "VIP is not enabled."
-    vip_pay = "Processing your payments...If it's not responding after one minute, please contact @BennyThink."
+1. Afdian: attach order number with /redeem command (e.g., `/redeem 123456`).
+2. Buy Me a Coffee: attach email with /redeem command (e.g., `/redeem 123@x.com`). **Use different email each time.**
+3. Telegram Payment & Tron(TRX): automatically activated within 60s. Check /start to see your balance.
+
+Want to buy more token with Telegram payment? Let's say 100? Here you go! `/buy 123`
+    """
 
     private = "This bot is for private use"
+
     membership_require = f"You need to join this group or channel to use this bot\n\nhttps://t.me/{REQUIRED_MEMBERSHIP}"
 
     settings = """
-Select sending format and video quality. **Only applies to YouTube**
-High quality is recommended; Medium quality is aimed as 480P while low quality is aimed as 360P and 240P.
-    
-Remember if you choose to send as document, there will be no streaming. 
+Please choose the preferred format and video quality for your video. These settings only **apply to YouTube videos**.
+
+High quality is recommended. Medium quality aims to 720P, while low quality is 480P.
+
+If you choose to send the video as a document, it will not be possible to stream it.
 
 Your current settings:
 Video quality: **{0}**
@@ -94,43 +85,27 @@ Sending format: **{1}**
 """
     custom_text = os.getenv("CUSTOM_TEXT", "")
 
-    def remaining_quota_caption(self, chat_id):
-        if not ENABLE_VIP:
-            return ""
-        used, total, ttl = self.return_remaining_quota(chat_id)
-        refresh_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ttl + time.time()))
-        caption = f"Remaining quota: **{sizeof_fmt(used)}/{sizeof_fmt(total)}**, " \
-                  f"refresh at {refresh_time}\n"
-        return caption
+    premium_warning = """
+    Your file is too big, do you want me to try to send it as premium user? 
+    This is an experimental feature so you can only use it once per day.
+    Also, the premium user will know who you are and what you are downloading. 
+    You may be banned if you abuse this feature.
+    """
 
     @staticmethod
-    def return_remaining_quota(chat_id):
-        used, total, ttl = VIP().check_remaining_quota(chat_id)
-        return used, total, ttl
-
-    @staticmethod
-    def get_vip_greeting(chat_id):
-        if not ENABLE_VIP:
-            return ""
-        v = VIP().check_vip(chat_id)
-        if v:
-            return f"Hello {v[1]}, VIP{v[-2]}☺️\n\n"
-        else:
-            return ""
-
-    @staticmethod
-    def get_receive_link_text():
+    def get_receive_link_text() -> str:
         reserved = get_func_queue("reserved")
         if ENABLE_CELERY and reserved:
-            text = f"Too many tasks. Your tasks was added to the reserved queue {reserved}."
+            text = f"Your tasks was added to the reserved queue {reserved}. Processing...\n\n"
         else:
             text = "Your task was added to active queue.\nProcessing...\n\n"
 
         return text
 
     @staticmethod
-    def ping_worker():
+    def ping_worker() -> str:
         from tasks import app as celery_app
+
         workers = InfluxDB().extract_dashboard_data()
         # [{'celery@BennyのMBP': 'abc'}, {'celery@BennyのMBP': 'abc'}]
         response = celery_app.control.broadcast("ping_revision", reply=True)

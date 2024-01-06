@@ -18,74 +18,54 @@ import tempfile
 import time
 import uuid
 
+import coloredlogs
 import ffmpeg
 import psutil
 
-from config import ENABLE_CELERY
-from db import MySQL
+from config import TMPFILE_PATH
 from flower_tasks import app
 
 inspect = app.control.inspect()
 
 
 def apply_log_formatter():
-    logging.basicConfig(
+    coloredlogs.install(
         level=logging.INFO,
-        format='[%(asctime)s %(filename)s:%(lineno)d %(levelname).1s] %(message)s',
-        datefmt="%Y-%m-%d %H:%M:%S"
+        fmt="[%(asctime)s %(filename)s:%(lineno)d %(levelname).1s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
 
-def customize_logger(logger: "list"):
-    apply_log_formatter()
+def customize_logger(logger: list):
     for log in logger:
         logging.getLogger(log).setLevel(level=logging.INFO)
 
 
-def get_user_settings(user_id: "str") -> "tuple":
-    db = MySQL()
-    cur = db.cur
-    cur.execute("SELECT * FROM settings WHERE user_id = %s", (user_id,))
-    data = cur.fetchone()
-    if data is None:
-        return 100, "high", "video", "Celery"
-    return data
+def sizeof_fmt(num: int, suffix="B"):
+    for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
+        if abs(num) < 1024.0:
+            return "%3.1f%s%s" % (num, unit, suffix)
+        num /= 1024.0
+    return "%.1f%s%s" % (num, "Yi", suffix)
 
 
-def set_user_settings(user_id: int, field: "str", value: "str"):
-    db = MySQL()
-    cur = db.cur
-    cur.execute("SELECT * FROM settings WHERE user_id = %s", (user_id,))
-    data = cur.fetchone()
-    if data is None:
-        resolution = method = ""
-        if field == "resolution":
-            method = "video"
-            resolution = value
-        if field == "method":
-            method = value
-            resolution = "high"
-        cur.execute("INSERT INTO settings VALUES (%s,%s,%s,%s)", (user_id, resolution, method, "Celery"))
-    else:
-        cur.execute(f"UPDATE settings SET {field} =%s WHERE user_id = %s", (value, user_id))
-    db.con.commit()
-
-
-def is_youtube(url: "str"):
+def is_youtube(url: str):
     if url.startswith("https://www.youtube.com/") or url.startswith("https://youtu.be/"):
         return True
 
 
-def adjust_formats(user_id: "str", url: "str", formats: "list", hijack=None):
-    # high: best quality, 720P, 1080P, 2K, 4K, 8K
-    # medium: 480P
-    # low: 360P+240P
+def adjust_formats(user_id: int, url: str, formats: list, hijack=None):
+    from database import MySQL
+
+    # high: best quality 1080P, 2K, 4K, 8K
+    # medium: 720P
+    # low: 480P
     if hijack:
         formats.insert(0, hijack)
         return
 
-    mapping = {"high": [], "medium": [480], "low": [240, 360]}
-    settings = get_user_settings(user_id)
+    mapping = {"high": [], "medium": [720], "low": [480]}
+    settings = MySQL().get_user_settings(user_id)
     if settings and is_youtube(url):
         for m in mapping.get(settings[1], []):
             formats.insert(0, f"bestvideo[ext=mp4][height={m}]+bestaudio[ext=m4a]")
@@ -107,7 +87,7 @@ def get_metadata(video_path):
         logging.error(e)
     try:
         thumb = pathlib.Path(video_path).parent.joinpath(f"{uuid.uuid4().hex}-thunmnail.png").as_posix()
-        ffmpeg.input(video_path, ss=duration / 2).filter('scale', width, -1).output(thumb, vframes=1).run()
+        ffmpeg.input(video_path, ss=duration / 2).filter("scale", width, -1).output(thumb, vframes=1).run()
     except ffmpeg._run.Error:
         thumb = None
 
@@ -135,9 +115,9 @@ def get_func_queue(func) -> int:
         return 0
 
 
-def tail(f, lines=1, _buffer=4098):
+def tail_log(f, lines=1, _buffer=4098):
     """Tail a file and get X lines from the end"""
-    # place holder for the lines found
+    # placeholder for the lines found
     lines_found = []
 
     # block counter will be multiplied by buffer
@@ -169,7 +149,7 @@ def tail(f, lines=1, _buffer=4098):
 
 
 class Detector:
-    def __init__(self, logs: "str"):
+    def __init__(self, logs: str):
         self.logs = logs
 
     @staticmethod
@@ -185,28 +165,26 @@ class Detector:
             "types.UpdatesTooLong",
             "Got shutdown from remote",
             "Code is updated",
-            'Retrying "messages.GetMessages"',
             "OSError: Connection lost",
             "[Errno -3] Try again",
             "MISCONF",
         ]
         for indicator in indicators:
             if indicator in self.logs:
-                logging.warning("Potential crash detected by %s, it's time to commit suicide...", self.func_name())
+                logging.critical("kick out crash: %s", self.func_name())
                 return True
         logging.debug("No crash detected.")
 
     def next_salt_detector(self):
         text = "Next salt in"
-        if self.logs.count(text) >= 4:
-            logging.warning("Potential crash detected by %s, it's time to commit suicide...", self.func_name())
+        if self.logs.count(text) >= 5:
+            logging.critical("Next salt crash: %s", self.func_name())
             return True
 
-    def idle_detector(self):
-        mtime = os.stat("/var/log/ytdl.log").st_mtime
-        cur_ts = time.time()
-        if cur_ts - mtime > 300:
-            logging.warning("Potential crash detected by %s, it's time to commit suicide...", self.func_name())
+    def connection_reset_detector(self):
+        text = "Send exception: ConnectionResetError Connection lost"
+        if text in self.logs:
+            logging.critical("connection lost: %s ", self.func_name())
             return True
 
 
@@ -215,18 +193,24 @@ def auto_restart():
     if not os.path.exists(log_path):
         return
     with open(log_path) as f:
-        logs = "".join(tail(f, lines=10))
+        logs = "".join(tail_log(f, lines=10))
 
     det = Detector(logs)
     method_list = [getattr(det, func) for func in dir(det) if func.endswith("_detector")]
     for method in method_list:
         if method():
-            logging.critical("Bye bye world!☠️")
-            for item in pathlib.Path(tempfile.gettempdir()).glob("ytdl-*"):
+            logging.critical("%s bye bye world!☠️", method)
+            for item in pathlib.Path(TMPFILE_PATH or tempfile.gettempdir()).glob("ytdl-*"):
                 shutil.rmtree(item, ignore_errors=True)
-
+            time.sleep(5)
             psutil.Process().kill()
 
 
-if __name__ == '__main__':
+def clean_tempfile():
+    for item in pathlib.Path(TMPFILE_PATH or tempfile.gettempdir()).glob("ytdl-*"):
+        if time.time() - item.stat().st_ctime > 3600:
+            shutil.rmtree(item, ignore_errors=True)
+
+
+if __name__ == "__main__":
     auto_restart()
